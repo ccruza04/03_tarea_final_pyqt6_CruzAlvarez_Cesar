@@ -61,27 +61,21 @@ class MonitorWindow(QMainWindow):
         subtitle.setObjectName("subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Menú superior
         top_menu = QHBoxLayout()
         self.btn_toma = QPushButton("📊 Toma de datos")
         self.btn_visor = QPushButton("📁 Visor")
-        self.btn_graph = QPushButton("📈 Gráficas")
 
         self.btn_toma.clicked.connect(lambda: self.stack.setCurrentIndex(0))
         self.btn_visor.clicked.connect(lambda: self.stack.setCurrentIndex(1))
-        self.btn_graph.clicked.connect(lambda: self.stack.setCurrentIndex(2))
 
         top_menu.addStretch()
         top_menu.addWidget(self.btn_toma)
         top_menu.addWidget(self.btn_visor)
-        top_menu.addWidget(self.btn_graph)
         top_menu.addStretch()
 
-        # Páginas
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_capture_page())
         self.stack.addWidget(self._build_viewer_page())
-        self.stack.addWidget(self._build_graph_page())
 
         main_layout.addWidget(title)
         main_layout.addWidget(subtitle)
@@ -89,7 +83,7 @@ class MonitorWindow(QMainWindow):
         main_layout.addWidget(self.stack)
 
     # ----------------------------------------------------------------------
-    # Página de captura
+    # Página de captura (con gráfica)
     # ----------------------------------------------------------------------
 
     def _build_capture_page(self) -> QWidget:
@@ -122,9 +116,36 @@ class MonitorWindow(QMainWindow):
         self.status_label = QLabel("Estado: detenido")
         self.status_label.setObjectName("status")
         self.last_data_label = QLabel("Sin datos todavía.")
-
         layout.addWidget(self.status_label)
         layout.addWidget(self.last_data_label)
+
+        # ----------------- GRÁFICA EN TIEMPO REAL -----------------
+        pg.setConfigOptions(antialias=True)
+
+        self.graph_widget = pg.PlotWidget()
+        self.graph_widget.setBackground("w")
+        self.graph_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.graph_widget.setYRange(0, 100)
+        self.graph_widget.addLegend()
+        self.graph_widget.setLabel("left", "Uso (%)")
+        self.graph_widget.setLabel("bottom", "Muestras")
+
+        self.curve_cpu = self.graph_widget.plot(
+            pen=pg.mkPen("#2563EB", width=2), name="CPU"
+        )
+        self.curve_ram = self.graph_widget.plot(
+            pen=pg.mkPen("#059669", width=2), name="RAM"
+        )
+        self.curve_disk = self.graph_widget.plot(
+            pen=pg.mkPen("#D97706", width=2), name="Disco"
+        )
+
+        layout.addWidget(self.graph_widget)
+
+        self.data_cpu = []
+        self.data_ram = []
+        self.data_disk = []
+
         layout.addStretch()
         return page
 
@@ -163,7 +184,9 @@ class MonitorWindow(QMainWindow):
 
         self.table = QTableWidget()
         self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"])
+        self.table.setHorizontalHeaderLabels(
+            ["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setAlternatingRowColors(True)
 
@@ -184,36 +207,6 @@ class MonitorWindow(QMainWindow):
         layout.addLayout(search_layout)
         layout.addWidget(self.table)
         layout.addLayout(controls)
-        return page
-
-    # ----------------------------------------------------------------------
-    # Página de gráficas
-    # ----------------------------------------------------------------------
-
-    def _build_graph_page(self) -> QWidget:
-        page = QFrame()
-        page.setObjectName("card")
-        layout = QVBoxLayout(page)
-
-        pg.setConfigOptions(antialias=True)
-
-        self.graph_widget = pg.PlotWidget()
-        self.graph_widget.setBackground("w")
-        self.graph_widget.addLegend()
-
-        self.graph_widget.setLabel("left", "Uso (%)")
-        self.graph_widget.setLabel("bottom", "Muestras")
-
-        self.curve_cpu = self.graph_widget.plot(pen=pg.mkPen("#2563EB", width=2), name="CPU")
-        self.curve_ram = self.graph_widget.plot(pen=pg.mkPen("#059669", width=2), name="RAM")
-        self.curve_disk = self.graph_widget.plot(pen=pg.mkPen("#D97706", width=2), name="Disco")
-
-        layout.addWidget(self.graph_widget)
-
-        self.data_cpu = []
-        self.data_ram = []
-        self.data_disk = []
-
         return page
 
     # ----------------------------------------------------------------------
@@ -270,7 +263,9 @@ class MonitorWindow(QMainWindow):
     def _ensure_header(self) -> None:
         if not self.output_file.exists() or self.output_file.stat().st_size == 0:
             with self.output_file.open("w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"])
+                csv.writer(f).writerow(
+                    ["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"]
+                )
 
     def start_capture(self) -> None:
         self.timer.start(self.interval_spin.value() * 1000)
@@ -301,7 +296,7 @@ class MonitorWindow(QMainWindow):
             f"Última toma: {stamp} | CPU: {cpu}% | RAM: {ram}% | Disco: {disk}%"
         )
 
-        # Actualizar gráficas
+        # Actualizar datos de la gráfica
         self.data_cpu.append(cpu)
         self.data_ram.append(ram)
         self.data_disk.append(disk)
@@ -328,7 +323,6 @@ class MonitorWindow(QMainWindow):
         hour_query = self.search_input.text().strip()
 
         rows = self._read_rows()
-
         filtered = [row for row in rows if row[0].startswith(selected_date)]
 
         if hour_query:
@@ -354,11 +348,18 @@ class MonitorWindow(QMainWindow):
             for j, value in enumerate(row):
                 self.table.setItem(i, j, QTableWidgetItem(value))
 
+        # columna hora más ancha
+        self.table.setColumnWidth(0, 180)
+
     def clear_file(self) -> None:
-        answer = QMessageBox.question(self, "Confirmar", "¿Seguro que quieres vaciar el archivo?")
+        answer = QMessageBox.question(
+            self, "Confirmar", "¿Seguro que quieres vaciar el archivo?"
+        )
         if answer == QMessageBox.StandardButton.Yes:
             with self.output_file.open("w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"])
+                csv.writer(f).writerow(
+                    ["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"]
+                )
             self.load_file_to_table()
 
 
