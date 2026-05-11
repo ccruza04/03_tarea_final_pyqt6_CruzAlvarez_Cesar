@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QDateEdit,   # ← IMPORTANTE
 )
 
 
@@ -30,7 +31,7 @@ class MonitorWindow(QMainWindow):
         self.setWindowTitle("Monitor del sistema")
         self.resize(1100, 650)
 
-        self.output_file = Path("monitor.txt")
+        self.output_file = Path("../monitor.txt")
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.capture_data)
 
@@ -38,6 +39,10 @@ class MonitorWindow(QMainWindow):
         self._apply_styles()
         self._ensure_header()
         self.load_file_to_table()
+
+    # ----------------------------------------------------------------------
+    # UI
+    # ----------------------------------------------------------------------
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -49,6 +54,7 @@ class MonitorWindow(QMainWindow):
         title = QLabel("Monitor de sistema")
         title.setObjectName("title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         subtitle = QLabel("Toma de métricas en tiempo real y consulta histórica")
         subtitle.setObjectName("subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -111,19 +117,36 @@ class MonitorWindow(QMainWindow):
         page.setObjectName("card")
         layout = QVBoxLayout(page)
 
+        # ------------------------------------------------------------------
+        # BUSCADOR CON SELECTOR DE FECHA + HORA
+        # ------------------------------------------------------------------
         search_layout = QHBoxLayout()
+
+        self.date_selector = QDateEdit()
+        self.date_selector.setCalendarPopup(True)
+        self.date_selector.setDisplayFormat("yyyy-MM-dd")
+        self.date_selector.setDate(datetime.now().date())
+
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Buscar por fecha/hora (ej: 2026-05-11 14:32)")
+        self.search_input.setPlaceholderText("Hora opcional (ej: 14:32)")
+
         self.btn_search = QPushButton("🔎 Buscar")
         self.btn_reset = QPushButton("↺ Mostrar todo")
+
         self.btn_search.clicked.connect(self.search_metrics)
         self.btn_reset.clicked.connect(self.load_file_to_table)
         self.search_input.returnPressed.connect(self.search_metrics)
-        search_layout.addWidget(QLabel("Momento:"))
+
+        search_layout.addWidget(QLabel("Fecha:"))
+        search_layout.addWidget(self.date_selector)
+        search_layout.addWidget(QLabel("Hora:"))
         search_layout.addWidget(self.search_input)
         search_layout.addWidget(self.btn_search)
         search_layout.addWidget(self.btn_reset)
 
+        # ------------------------------------------------------------------
+        # TABLA
+        # ------------------------------------------------------------------
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"])
@@ -146,21 +169,56 @@ class MonitorWindow(QMainWindow):
         layout.addLayout(controls)
         return page
 
+    # ----------------------------------------------------------------------
+    # ESTILOS
+    # ----------------------------------------------------------------------
+
     def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
-            QWidget { font-size: 14px; }
+        self.setStyleSheet("""
+            QWidget { font-size: 14px; background-color: #F3F4F6; color: #111827; }
             #title { font-size: 28px; font-weight: 700; color: #1F2937; }
             #subtitle { color: #4B5563; margin-bottom: 8px; }
-            #card { background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 12px; padding: 14px; }
-            QPushButton { background: #2563EB; color: white; border: none; border-radius: 8px; padding: 8px 12px; }
+            #card {
+                background: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 12px;
+                padding: 14px;
+            }
+            QPushButton {
+                background: #2563EB;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-weight: 500;
+            }
             QPushButton:hover { background: #1D4ED8; }
-            QPushButton:disabled { background: #9CA3AF; }
-            QLineEdit, QSpinBox { background: white; border: 1px solid #D1D5DB; border-radius: 6px; padding: 6px; }
-            QTableWidget { background: white; border: 1px solid #D1D5DB; }
+            QPushButton:disabled { background: #9CA3AF; color: #E5E7EB; }
+            QLineEdit, QSpinBox {
+                background: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 6px;
+                padding: 6px;
+            }
+            QTableWidget {
+                background: #FFFFFF;
+                alternate-background-color: #F9FAFB;
+                gridline-color: #D1D5DB;
+                selection-background-color: #2563EB;
+                selection-color: white;
+            }
+            QHeaderView::section {
+                background-color: #E5E7EB;
+                padding: 6px;
+                border: 1px solid #D1D5DB;
+                font-weight: 600;
+            }
             #status { font-weight: 600; color: #065F46; }
-            """
-        )
+        """)
+
+    # ----------------------------------------------------------------------
+    # LÓGICA
+    # ----------------------------------------------------------------------
 
     def _ensure_header(self) -> None:
         if not self.output_file.exists() or self.output_file.stat().st_size == 0:
@@ -201,14 +259,17 @@ class MonitorWindow(QMainWindow):
         self.result_label.setText(f"Registros: {len(rows)}")
 
     def search_metrics(self) -> None:
-        query = self.search_input.text().strip().lower()
-        rows = self._read_rows()
-        if not query:
-            self._render_rows(rows)
-            self.result_label.setText(f"Registros: {len(rows)}")
-            return
+        selected_date = self.date_selector.date().toString("yyyy-MM-dd")
+        hour_query = self.search_input.text().strip()
 
-        filtered = [row for row in rows if query in row[0].lower()]
+        rows = self._read_rows()
+
+        filtered = [row for row in rows if row[0].startswith(selected_date)]
+
+        if hour_query:
+            hour_query = hour_query.lower()
+            filtered = [row for row in filtered if hour_query in row[0].lower()]
+
         self._render_rows(filtered)
         self.result_label.setText(f"Coincidencias: {len(filtered)}")
 
