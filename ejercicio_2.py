@@ -1,13 +1,11 @@
 import sqlite3
 import sys
-from math import ceil
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -20,12 +18,17 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QStyle,
+    QTabWidget,
+    QDialog,
+    QCompleter,
 )
 
 DB_PATH = Path("libros.db")
 
 
+# ---------------------------------------------------------
+#   BASE DE DATOS
+# ---------------------------------------------------------
 class BibliotecaDB:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -77,6 +80,81 @@ class BibliotecaDB:
         return cursor.fetchall()
 
 
+# ---------------------------------------------------------
+#   DIÁLOGO LISTADO
+# ---------------------------------------------------------
+class ListadoDialog(QDialog):
+    def __init__(self, db: BibliotecaDB, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("Listado de libros")
+        self.resize(800, 500)
+        self._init_ui()
+        self._load_data()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        search_layout = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Filtrar por ISBN, título o autor...")
+        search_layout.addWidget(QLabel("Filtro:"))
+        search_layout.addWidget(self.search_input)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["ISBN", "Título", "Autor", "Descripción"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+
+        footer = QHBoxLayout()
+        self.lbl_info = QLabel("")
+        footer.addWidget(self.lbl_info)
+        footer.addStretch()
+        footer.addWidget(btn_close)
+
+        layout.addLayout(search_layout)
+        layout.addWidget(self.table)
+        layout.addLayout(footer)
+
+        self.search_input.textChanged.connect(self._apply_filter)
+
+    def _load_data(self):
+        self._rows = list(self.db.listado())
+        self._populate_table(self._rows)
+
+    def _apply_filter(self):
+        text = self.search_input.text().strip().lower()
+        if not text:
+            filtered = self._rows
+        else:
+            filtered = [
+                r
+                for r in self._rows
+                if text in r["isbn"].lower()
+                or text in r["titulo"].lower()
+                or text in r["autor"].lower()
+            ]
+        self._populate_table(filtered)
+
+    def _populate_table(self, rows):
+        self.table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            self.table.setItem(i, 0, QTableWidgetItem(row["isbn"]))
+            self.table.setItem(i, 1, QTableWidgetItem(row["titulo"]))
+            self.table.setItem(i, 2, QTableWidgetItem(row["autor"]))
+            self.table.setItem(i, 3, QTableWidgetItem(row["descripcion"] or ""))
+        self.table.resizeColumnsToContents()
+        self.lbl_info.setText(f"{len(rows)} libros mostrados")
+
+
+# ---------------------------------------------------------
+#   VENTANA PRINCIPAL
+# ---------------------------------------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -84,145 +162,177 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Gestión de Libros - PyQt6 + SQLite")
         self.resize(1000, 650)
 
-        self.page_size = 20
-        self.current_page = 0
-        self._all_rows = []
-
         self._init_ui()
         self._apply_styles()
-        self._recargar_tabla()
+        self._configurar_autocompletado()
 
     def _init_ui(self):
+        # Quitamos la barra de menú
+        self.setMenuBar(None)
+
         central = QWidget()
         self.setCentralWidget(central)
+
         main_layout = QVBoxLayout(central)
 
-        # --- Formulario ---
-        form_box = QGroupBox("Datos del libro")
-        form_layout = QFormLayout(form_box)
+        self.tabs = QTabWidget()
+        self._init_tab_nuevo()
+        self._init_tab_buscar()
+        self._init_tab_consultar()
 
-        self.isbn_input = QLineEdit()
-        self.titulo_input = QLineEdit()
-        self.autor_input = QLineEdit()
-        self.descripcion_input = QPlainTextEdit()
-        self.descripcion_input.setPlaceholderText("Descripción del libro...")
-        self.descripcion_input.setFixedHeight(100)
+        btn_listar_menu = QPushButton("Listar todo")
+        btn_listar_menu.clicked.connect(self._accion_listar)
 
-        form_layout.addRow("ISBN:", self.isbn_input)
-        form_layout.addRow("Título:", self.titulo_input)
-        form_layout.addRow("Autor:", self.autor_input)
-        form_layout.addRow("Descripción:", self.descripcion_input)
 
-        # --- Botones de acciones ---
-        btn_grid = QGridLayout()
-        style = self.style()
+        menu_layout = QHBoxLayout()
+        menu_layout.addWidget(btn_listar_menu)
+        menu_layout.addStretch()
 
-        self.btn_nuevo = QPushButton("Crear libro")
-        self.btn_nuevo.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        main_layout.addLayout(menu_layout)
+        main_layout.addWidget(self.tabs)
 
-        self.btn_guardar = QPushButton("Guardar libro")
-        self.btn_guardar.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
-
-        self.btn_consulta = QPushButton("Buscar libro")
-        self.btn_consulta.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
-
-        self.btn_editar = QPushButton("Actualizar libro")
-        self.btn_editar.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-
-        self.btn_borrar = QPushButton("Eliminar libro")
-        self.btn_borrar.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
-
-        self.btn_listado = QPushButton("Mostrar todos los libros")
-        self.btn_listado.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogListView))
-
-        self.btn_limpiar = QPushButton("Limpiar campos")
-        self.btn_limpiar.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
-
-        self.btn_salir = QPushButton("Cerrar aplicación")
-        self.btn_salir.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
-
-        btn_grid.addWidget(self.btn_nuevo, 0, 0)
-        btn_grid.addWidget(self.btn_guardar, 0, 1)
-        btn_grid.addWidget(self.btn_consulta, 0, 2)
-        btn_grid.addWidget(self.btn_editar, 1, 0)
-        btn_grid.addWidget(self.btn_borrar, 1, 1)
-        btn_grid.addWidget(self.btn_listado, 1, 2)
-        btn_grid.addWidget(self.btn_limpiar, 2, 0, 1, 3)
-
-        top_layout = QVBoxLayout()
-        top_layout.addWidget(form_box)
-        top_layout.addLayout(btn_grid)
-
-        # --- Buscador global ---
-        search_box = QGroupBox("Búsqueda")
-        search_layout = QHBoxLayout(search_box)
-        self.search_global = QLineEdit()
-        self.search_global.setPlaceholderText("Buscar por título o autor...")
-        search_layout.addWidget(QLabel("Filtro:"))
-        search_layout.addWidget(self.search_global)
-
-        # --- Tabla ---
-        table_box = QGroupBox("Listado de libros")
-        table_layout = QVBoxLayout(table_box)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["ISBN", "Título", "Autor", "Descripción"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.itemSelectionChanged.connect(self._cargar_seleccion_a_form)
-        table_layout.addWidget(self.table)
-
-        # --- Paginación + estado + salir ---
-        footer = QHBoxLayout()
         self.lbl_estado = QLabel("Listo")
         self.lbl_estado.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-        self.btn_prev_page = QPushButton("◀ Anterior")
-        self.btn_next_page = QPushButton("Siguiente ▶")
-        self.lbl_paginacion = QLabel("Página 1/1")
-
+        footer = QHBoxLayout()
         footer.addWidget(self.lbl_estado)
         footer.addStretch()
-        footer.addWidget(self.btn_prev_page)
-        footer.addWidget(self.btn_next_page)
-        footer.addWidget(self.lbl_paginacion)
-        footer.addSpacing(20)
-        footer.addWidget(self.btn_salir)
 
-        main_layout.addLayout(top_layout)
-        main_layout.addWidget(search_box)
-        main_layout.addWidget(table_box)
         main_layout.addLayout(footer)
 
-        # --- Conexiones ---
-        self.btn_nuevo.clicked.connect(self._accion_nuevo)
-        self.btn_guardar.clicked.connect(self._accion_guardar)
-        self.btn_consulta.clicked.connect(self._accion_consulta)
-        self.btn_editar.clicked.connect(self._accion_editar)
-        self.btn_borrar.clicked.connect(self._accion_borrar)
-        self.btn_listado.clicked.connect(self._recargar_tabla)
-        self.btn_limpiar.clicked.connect(self._limpiar_form)
-        self.btn_salir.clicked.connect(self.close)
+    # ---------------------------------------------------------
+    #   AUTOCOMPLETADO ISBN – TÍTULO
+    # ---------------------------------------------------------
+    def _configurar_autocompletado(self):
+        libros = self.db.listado()
+        sugerencias = [f'{l["isbn"]} - {l["titulo"]}' for l in libros]
 
-        self.search_global.textChanged.connect(self._aplicar_filtro_y_paginacion)
-        self.btn_prev_page.clicked.connect(self._pagina_anterior)
-        self.btn_next_page.clicked.connect(self._pagina_siguiente)
+        completer = QCompleter(sugerencias)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
+        self.isbn_buscar.setCompleter(completer)
+
+    # ---------------------------------------------------------
+    #   PESTAÑA NUEVO LIBRO
+    # ---------------------------------------------------------
+    def _init_tab_nuevo(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        form_box = QGroupBox("Nuevo libro")
+        form_layout = QFormLayout(form_box)
+
+        self.isbn_nuevo = QLineEdit()
+        self.titulo_nuevo = QLineEdit()
+        self.autor_nuevo = QLineEdit()
+        self.descripcion_nuevo = QPlainTextEdit()
+        self.descripcion_nuevo.setFixedHeight(100)
+
+        form_layout.addRow("ISBN:", self.isbn_nuevo)
+        form_layout.addRow("Título:", self.titulo_nuevo)
+        form_layout.addRow("Autor:", self.autor_nuevo)
+        form_layout.addRow("Descripción:", self.descripcion_nuevo)
+
+        btn_crear = QPushButton("Crear libro")
+        btn_crear.clicked.connect(self._accion_crear)
+
+        layout.addWidget(form_box)
+        layout.addWidget(btn_crear)
+        layout.addStretch()
+
+        self.tabs.addTab(tab, "Nuevo libro")
+
+    # ---------------------------------------------------------
+    #   PESTAÑA BUSCAR / MODIFICAR / BORRAR
+    # ---------------------------------------------------------
+    def _init_tab_buscar(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        form_box = QGroupBox("Buscar / Modificar / Borrar libro")
+        form_layout = QFormLayout(form_box)
+
+        self.isbn_buscar = QLineEdit()
+        self.titulo_buscar = QLineEdit()
+        self.autor_buscar = QLineEdit()
+        self.descripcion_buscar = QPlainTextEdit()
+        self.descripcion_buscar.setFixedHeight(100)
+
+        form_layout.addRow("ISBN:", self.isbn_buscar)
+        form_layout.addRow("Título:", self.titulo_buscar)
+        form_layout.addRow("Autor:", self.autor_buscar)
+        form_layout.addRow("Descripción:", self.descripcion_buscar)
+
+        btn_layout = QHBoxLayout()
+        btn_buscar = QPushButton("Autorellenar")
+        btn_modificar = QPushButton("Modificar libro")
+        btn_borrar = QPushButton("Borrar libro")
+
+
+        btn_buscar.clicked.connect(self._accion_buscar)
+        btn_modificar.clicked.connect(self._accion_modificar)
+        btn_borrar.clicked.connect(self._accion_borrar)
+
+
+        btn_layout.addWidget(btn_buscar)
+        btn_layout.addWidget(btn_modificar)
+        btn_layout.addWidget(btn_borrar)
+
+        btn_layout.addStretch()
+
+        layout.addWidget(form_box)
+        layout.addLayout(btn_layout)
+        layout.addStretch()
+
+        self.tabs.addTab(tab, "Buscar libro")
+
+
+    # ---------------------------------------------------------
+    #   PESTAÑA CONSULTAR
+    # ---------------------------------------------------------
+    def _init_tab_consultar(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        form_box = QGroupBox("Consultar por ISBN")
+        form_layout = QFormLayout(form_box)
+
+        self.isbn_consulta = QLineEdit()
+        self.titulo_consulta = QLineEdit()
+        self.autor_consulta = QLineEdit()
+        self.descripcion_consulta = QPlainTextEdit()
+        self.descripcion_consulta.setFixedHeight(100)
+
+        self.titulo_consulta.setReadOnly(True)
+        self.autor_consulta.setReadOnly(True)
+        self.descripcion_consulta.setReadOnly(True)
+
+        form_layout.addRow("ISBN:", self.isbn_consulta)
+        form_layout.addRow("Título:", self.titulo_consulta)
+        form_layout.addRow("Autor:", self.autor_consulta)
+        form_layout.addRow("Descripción:", self.descripcion_consulta)
+
+        btn_consultar = QPushButton("Consultar")
+        btn_consultar.clicked.connect(self._accion_consultar)
+
+        layout.addWidget(form_box)
+        layout.addWidget(btn_consultar)
+        layout.addStretch()
+
+        self.tabs.addTab(tab, "Consultar por ISBN")
+
+    # ---------------------------------------------------------
+    #   ESTILOS
+    # ---------------------------------------------------------
     def _apply_styles(self):
         self.setStyleSheet(
             """
             QWidget { font-size: 14px; }
-            QGroupBox {
-                font-weight: 600;
-                border: 1px solid #D1D5DB;
-                border-radius: 6px;
-                margin-top: 8px;
-            }
             QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
+            subcontrol-origin: padding;
+            padding: 2px 8px;
             }
+
             QPushButton {
                 background-color: #2563EB;
                 color: white;
@@ -232,116 +342,95 @@ class MainWindow(QMainWindow):
             QPushButton:hover {
                 background-color: #1D4ED8;
             }
-            QPushButton:disabled {
-                background-color: #9CA3AF;
-            }
             QLineEdit, QPlainTextEdit {
                 border: 1px solid #D1D5DB;
                 border-radius: 4px;
                 padding: 4px;
             }
-            QTableWidget {
-                gridline-color: #D1D5DB;
-                alternate-background-color: #F9FAFB;
-            }
-            QHeaderView::section {
-                background-color: #E5E7EB;
-                padding: 4px;
-                border: 1px solid #D1D5DB;
-            }
             """
         )
 
-    def _valores_form(self):
-        return (
-            self.isbn_input.text().strip(),
-            self.titulo_input.text().strip(),
-            self.autor_input.text().strip(),
-            self.descripcion_input.toPlainText().strip(),
-        )
-
-    def _reset_validacion(self):
-        for widget in (self.isbn_input, self.titulo_input, self.autor_input):
-            widget.setStyleSheet("")
-
-    def _validar_para_guardar(self):
-        self._reset_validacion()
-        isbn, titulo, autor, _ = self._valores_form()
+    # ---------------------------------------------------------
+    #   VALIDACIÓN
+    # ---------------------------------------------------------
+    def _validar_campos(self, isbn: QLineEdit, titulo: QLineEdit, autor: QLineEdit):
         ok = True
-        if not isbn:
-            self.isbn_input.setStyleSheet("border: 2px solid #DC2626;")
+        for w in (isbn, titulo, autor):
+            w.setStyleSheet("")
+        if not isbn.text().strip():
+            isbn.setStyleSheet("border: 2px solid #DC2626;")
             ok = False
-        if not titulo:
-            self.titulo_input.setStyleSheet("border: 2px solid #DC2626;")
+        if not titulo.text().strip():
+            titulo.setStyleSheet("border: 2px solid #DC2626;")
             ok = False
-        if not autor:
-            self.autor_input.setStyleSheet("border: 2px solid #DC2626;")
+        if not autor.text().strip():
+            autor.setStyleSheet("border: 2px solid #DC2626;")
             ok = False
         if not ok:
             QMessageBox.warning(self, "Campos obligatorios", "ISBN, título y autor son obligatorios.")
         return ok
 
-    # --- Acciones ---
+    # ---------------------------------------------------------
+    #   ACCIONES
+    # ---------------------------------------------------------
+    def _accion_crear(self):
+        isbn = self.isbn_nuevo.text().strip()
+        titulo = self.titulo_nuevo.text().strip()
+        autor = self.autor_nuevo.text().strip()
+        descripcion = self.descripcion_nuevo.toPlainText().strip()
 
-    def _accion_nuevo(self):
-        if not self._validar_para_guardar():
+        if not self._validar_campos(self.isbn_nuevo, self.titulo_nuevo, self.autor_nuevo):
             return
-        isbn, titulo, autor, descripcion = self._valores_form()
+
         try:
             self.db.nuevo_libro(isbn, titulo, autor, descripcion)
             self.lbl_estado.setText(f"Libro {isbn} creado.")
-            self._recargar_tabla()
+            self._configurar_autocompletado()
         except sqlite3.IntegrityError:
             QMessageBox.warning(self, "ISBN duplicado", "Ya existe un libro con ese ISBN.")
 
-    def _accion_guardar(self):
-        if not self._validar_para_guardar():
-            return
-        isbn, titulo, autor, descripcion = self._valores_form()
-        existente = self.db.consultar(isbn)
-        if existente:
-            ok = self.db.editar(isbn, titulo, autor, descripcion)
-            if ok:
-                self.lbl_estado.setText(f"Libro {isbn} actualizado (guardar).")
-        else:
-            try:
-                self.db.nuevo_libro(isbn, titulo, autor, descripcion)
-                self.lbl_estado.setText(f"Libro {isbn} creado (guardar).")
-            except sqlite3.IntegrityError:
-                QMessageBox.warning(self, "Error", "No se ha podido guardar el libro.")
-        self._recargar_tabla()
+    def _accion_buscar(self):
+        texto = self.isbn_buscar.text().strip()
+        isbn = texto.split(" - ")[0] if " - " in texto else texto
 
-    def _accion_consulta(self):
-        isbn = self.isbn_input.text().strip()
         if not isbn:
-            QMessageBox.information(self, "Consulta", "Introduce un ISBN para consultar.")
+            QMessageBox.information(self, "Buscar", "Introduce un ISBN para buscar.")
             return
 
         row = self.db.consultar(isbn)
         if not row:
-            QMessageBox.information(self, "Consulta", f"No existe un libro con ISBN {isbn}.")
+            QMessageBox.information(self, "Buscar", f"No existe un libro con ISBN {isbn}.")
             return
 
-        self.titulo_input.setText(row["titulo"])
-        self.autor_input.setText(row["autor"])
-        self.descripcion_input.setPlainText(row["descripcion"] or "")
+        self.titulo_buscar.setText(row["titulo"])
+        self.autor_buscar.setText(row["autor"])
+        self.descripcion_buscar.setPlainText(row["descripcion"] or "")
         self.lbl_estado.setText(f"Libro {isbn} cargado.")
 
-    def _accion_editar(self):
-        if not self._validar_para_guardar():
+    def _accion_modificar(self):
+        texto = self.isbn_buscar.text().strip()
+        isbn = texto.split(" - ")[0] if " - " in texto else texto
+
+        titulo = self.titulo_buscar.text().strip()
+        autor = self.autor_buscar.text().strip()
+        descripcion = self.descripcion_buscar.toPlainText().strip()
+
+        if not self._validar_campos(self.isbn_buscar, self.titulo_buscar, self.autor_buscar):
             return
-        isbn, titulo, autor, descripcion = self._valores_form()
+
         ok = self.db.editar(isbn, titulo, autor, descripcion)
         if ok:
             self.lbl_estado.setText(f"Libro {isbn} actualizado.")
-            self._recargar_tabla()
+            self._configurar_autocompletado()
         else:
-            QMessageBox.information(self, "Edición", f"No existe un libro con ISBN {isbn}.")
+            QMessageBox.information(self, "Modificar", f"No existe un libro con ISBN {isbn}.")
 
     def _accion_borrar(self):
-        isbn = self.isbn_input.text().strip()
+        texto = self.isbn_buscar.text().strip()
+        isbn = texto.split(" - ")[0] if " - " in texto else texto
+
         if not isbn:
-            QMessageBox.information(self, "Borrado", "Introduce un ISBN para borrar.")
+            QMessageBox.information(self, "Borrar", "Introduce un ISBN para borrar.")
             return
 
         confirm = QMessageBox.question(
@@ -355,92 +444,34 @@ class MainWindow(QMainWindow):
         ok = self.db.borrar(isbn)
         if ok:
             self.lbl_estado.setText(f"Libro {isbn} eliminado.")
-            self._limpiar_form()
-            self._recargar_tabla()
+            self._configurar_autocompletado()
         else:
-            QMessageBox.information(self, "Borrado", f"No existe un libro con ISBN {isbn}.")
+            QMessageBox.information(self, "Borrar", f"No existe un libro con ISBN {isbn}.")
 
-    # --- Listado, filtro y paginación ---
-
-    def _recargar_tabla(self):
-        self._all_rows = list(self.db.listado())
-        self.current_page = 0
-        self._aplicar_filtro_y_paginacion()
-        self.lbl_estado.setText(f"Listado actualizado ({len(self._all_rows)} libros).")
-
-    def _aplicar_filtro_y_paginacion(self):
-        filtro = self.search_global.text().strip().lower()
-        if filtro:
-            filtered = [
-                row
-                for row in self._all_rows
-                if filtro in (row["titulo"] or "").lower()
-                or filtro in (row["autor"] or "").lower()
-            ]
-            self._poblar_tabla(filtered)
-            self.lbl_paginacion.setText(f"Filtrados: {len(filtered)}")
-            self.btn_prev_page.setEnabled(False)
-            self.btn_next_page.setEnabled(False)
-        else:
-            total = len(self._all_rows)
-            if total == 0:
-                self._poblar_tabla([])
-                self.lbl_paginacion.setText("Página 0/0")
-                self.btn_prev_page.setEnabled(False)
-                self.btn_next_page.setEnabled(False)
-                return
-
-            total_pages = ceil(total / self.page_size)
-            self.current_page = max(0, min(self.current_page, total_pages - 1))
-            start = self.current_page * self.page_size
-            end = start + self.page_size
-            page_rows = self._all_rows[start:end]
-            self._poblar_tabla(page_rows)
-
-            self.lbl_paginacion.setText(
-                f"Página {self.current_page + 1}/{total_pages} ({total} libros)"
-            )
-            self.btn_prev_page.setEnabled(self.current_page > 0)
-            self.btn_next_page.setEnabled(self.current_page < total_pages - 1)
-
-    def _poblar_tabla(self, rows):
-        self.table.setRowCount(len(rows))
-        for i, row in enumerate(rows):
-            self.table.setItem(i, 0, QTableWidgetItem(row["isbn"]))
-            self.table.setItem(i, 1, QTableWidgetItem(row["titulo"]))
-            self.table.setItem(i, 2, QTableWidgetItem(row["autor"]))
-            self.table.setItem(i, 3, QTableWidgetItem(row["descripcion"] or ""))
-        self.table.resizeColumnsToContents()
-
-    def _pagina_anterior(self):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._aplicar_filtro_y_paginacion()
-
-    def _pagina_siguiente(self):
-        self.current_page += 1
-        self._aplicar_filtro_y_paginacion()
-
-    # --- Utilidades UI ---
-
-    def _limpiar_form(self):
-        self.isbn_input.clear()
-        self.titulo_input.clear()
-        self.autor_input.clear()
-        self.descripcion_input.clear()
-        self._reset_validacion()
-
-    def _cargar_seleccion_a_form(self):
-        items = self.table.selectedItems()
-        if not items:
+    def _accion_consultar(self):
+        isbn = self.isbn_consulta.text().strip()
+        if not isbn:
+            QMessageBox.information(self, "Consulta", "Introduce un ISBN para consultar.")
             return
-        fila = items[0].row()
-        self.isbn_input.setText(self.table.item(fila, 0).text())
-        self.titulo_input.setText(self.table.item(fila, 1).text())
-        self.autor_input.setText(self.table.item(fila, 2).text())
-        self.descripcion_input.setPlainText(self.table.item(fila, 3).text())
+
+        row = self.db.consultar(isbn)
+        if not row:
+            QMessageBox.information(self, "Consulta", f"No existe un libro con ISBN {isbn}.")
+            return
+
+        self.titulo_consulta.setText(row["titulo"])
+        self.autor_consulta.setText(row["autor"])
+        self.descripcion_consulta.setPlainText(row["descripcion"] or "")
+        self.lbl_estado.setText(f"Libro {isbn} consultado.")
+
+    def _accion_listar(self):
+        dlg = ListadoDialog(self.db, self)
+        dlg.exec()
 
 
+# ---------------------------------------------------------
+#   MAIN
+# ---------------------------------------------------------
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()

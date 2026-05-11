@@ -51,4 +51,12 @@ def poblar_libros(cantidad: int = 100):
 
 
 if __name__ == "__main__":
-    poblar_libros(100)
+    print("=== Generador de libros ===")
+    while True:
+        entrada = input("¿Cuántos libros quieres generar? (ej: 100): ").strip()
+        if entrada.isdigit() and int(entrada) > 0:
+            cantidad = int(entrada)
+            break
+        print("⚠️  Por favor, introduce un número válido mayor que 0.")
+
+    poblar_libros(cantidad)
