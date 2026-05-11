@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 
 import psutil
+import pyqtgraph as pg
+
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
     QApplication,
@@ -21,7 +23,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QDateEdit,   # ← IMPORTANTE
+    QDateEdit,
 )
 
 
@@ -29,7 +31,7 @@ class MonitorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Monitor del sistema")
-        self.resize(1100, 650)
+        self.resize(1200, 700)
 
         self.output_file = Path("../monitor.txt")
         self.timer = QTimer(self)
@@ -55,28 +57,40 @@ class MonitorWindow(QMainWindow):
         title.setObjectName("title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        subtitle = QLabel("Toma de métricas en tiempo real y consulta histórica")
+        subtitle = QLabel("Toma de métricas en tiempo real, gráficas y consulta histórica")
         subtitle.setObjectName("subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # Menú superior
         top_menu = QHBoxLayout()
         self.btn_toma = QPushButton("📊 Toma de datos")
         self.btn_visor = QPushButton("📁 Visor")
+        self.btn_graph = QPushButton("📈 Gráficas")
+
         self.btn_toma.clicked.connect(lambda: self.stack.setCurrentIndex(0))
-        self.btn_visor.clicked.connect(self.switch_to_viewer)
+        self.btn_visor.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+        self.btn_graph.clicked.connect(lambda: self.stack.setCurrentIndex(2))
+
         top_menu.addStretch()
         top_menu.addWidget(self.btn_toma)
         top_menu.addWidget(self.btn_visor)
+        top_menu.addWidget(self.btn_graph)
         top_menu.addStretch()
 
+        # Páginas
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_capture_page())
         self.stack.addWidget(self._build_viewer_page())
+        self.stack.addWidget(self._build_graph_page())
 
         main_layout.addWidget(title)
         main_layout.addWidget(subtitle)
         main_layout.addLayout(top_menu)
         main_layout.addWidget(self.stack)
+
+    # ----------------------------------------------------------------------
+    # Página de captura
+    # ----------------------------------------------------------------------
 
     def _build_capture_page(self) -> QWidget:
         page = QFrame()
@@ -86,8 +100,7 @@ class MonitorWindow(QMainWindow):
 
         form = QFormLayout()
         self.interval_spin = QSpinBox()
-        self.interval_spin.setMinimum(1)
-        self.interval_spin.setMaximum(3600)
+        self.interval_spin.setRange(1, 3600)
         self.interval_spin.setValue(5)
         self.interval_spin.setSuffix(" s")
         form.addRow("Intervalo de chequeo:", self.interval_spin)
@@ -97,8 +110,10 @@ class MonitorWindow(QMainWindow):
         self.btn_start = QPushButton("▶ Iniciar toma")
         self.btn_stop = QPushButton("⏹ Finalizar")
         self.btn_stop.setEnabled(False)
+
         self.btn_start.clicked.connect(self.start_capture)
         self.btn_stop.clicked.connect(self.stop_capture)
+
         actions.addWidget(self.btn_start)
         actions.addWidget(self.btn_stop)
         actions.addStretch()
@@ -107,19 +122,21 @@ class MonitorWindow(QMainWindow):
         self.status_label = QLabel("Estado: detenido")
         self.status_label.setObjectName("status")
         self.last_data_label = QLabel("Sin datos todavía.")
+
         layout.addWidget(self.status_label)
         layout.addWidget(self.last_data_label)
         layout.addStretch()
         return page
+
+    # ----------------------------------------------------------------------
+    # Página del visor
+    # ----------------------------------------------------------------------
 
     def _build_viewer_page(self) -> QWidget:
         page = QFrame()
         page.setObjectName("card")
         layout = QVBoxLayout(page)
 
-        # ------------------------------------------------------------------
-        # BUSCADOR CON SELECTOR DE FECHA + HORA
-        # ------------------------------------------------------------------
         search_layout = QHBoxLayout()
 
         self.date_selector = QDateEdit()
@@ -144,9 +161,6 @@ class MonitorWindow(QMainWindow):
         search_layout.addWidget(self.btn_search)
         search_layout.addWidget(self.btn_reset)
 
-        # ------------------------------------------------------------------
-        # TABLA
-        # ------------------------------------------------------------------
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"])
@@ -156,9 +170,12 @@ class MonitorWindow(QMainWindow):
         controls = QHBoxLayout()
         self.btn_refresh = QPushButton("Actualizar listado")
         self.btn_clear = QPushButton("Vaciar archivo")
+
         self.btn_refresh.clicked.connect(self.load_file_to_table)
         self.btn_clear.clicked.connect(self.clear_file)
+
         self.result_label = QLabel("")
+
         controls.addWidget(self.btn_refresh)
         controls.addWidget(self.btn_clear)
         controls.addStretch()
@@ -170,7 +187,37 @@ class MonitorWindow(QMainWindow):
         return page
 
     # ----------------------------------------------------------------------
-    # ESTILOS
+    # Página de gráficas
+    # ----------------------------------------------------------------------
+
+    def _build_graph_page(self) -> QWidget:
+        page = QFrame()
+        page.setObjectName("card")
+        layout = QVBoxLayout(page)
+
+        pg.setConfigOptions(antialias=True)
+
+        self.graph_widget = pg.PlotWidget()
+        self.graph_widget.setBackground("w")
+        self.graph_widget.addLegend()
+
+        self.graph_widget.setLabel("left", "Uso (%)")
+        self.graph_widget.setLabel("bottom", "Muestras")
+
+        self.curve_cpu = self.graph_widget.plot(pen=pg.mkPen("#2563EB", width=2), name="CPU")
+        self.curve_ram = self.graph_widget.plot(pen=pg.mkPen("#059669", width=2), name="RAM")
+        self.curve_disk = self.graph_widget.plot(pen=pg.mkPen("#D97706", width=2), name="Disco")
+
+        layout.addWidget(self.graph_widget)
+
+        self.data_cpu = []
+        self.data_ram = []
+        self.data_disk = []
+
+        return page
+
+    # ----------------------------------------------------------------------
+    # Estilos
     # ----------------------------------------------------------------------
 
     def _apply_styles(self) -> None:
@@ -217,7 +264,7 @@ class MonitorWindow(QMainWindow):
         """)
 
     # ----------------------------------------------------------------------
-    # LÓGICA
+    # Lógica
     # ----------------------------------------------------------------------
 
     def _ensure_header(self) -> None:
@@ -244,12 +291,30 @@ class MonitorWindow(QMainWindow):
         ram = round(psutil.virtual_memory().percent, 2)
         disk = round(psutil.disk_usage("/").percent, 2)
         net = psutil.net_io_counters()
+
         row = [stamp, cpu, ram, disk, int(net.bytes_sent), int(net.bytes_recv)]
 
         with self.output_file.open("a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(row)
 
-        self.last_data_label.setText(f"Última toma: {stamp} | CPU: {cpu}% | RAM: {ram}% | Disco: {disk}%")
+        self.last_data_label.setText(
+            f"Última toma: {stamp} | CPU: {cpu}% | RAM: {ram}% | Disco: {disk}%"
+        )
+
+        # Actualizar gráficas
+        self.data_cpu.append(cpu)
+        self.data_ram.append(ram)
+        self.data_disk.append(disk)
+
+        max_points = 100
+        self.data_cpu = self.data_cpu[-max_points:]
+        self.data_ram = self.data_ram[-max_points:]
+        self.data_disk = self.data_disk[-max_points:]
+
+        self.curve_cpu.setData(self.data_cpu)
+        self.curve_ram.setData(self.data_ram)
+        self.curve_disk.setData(self.data_disk)
+
         if self.stack.currentIndex() == 1:
             self.load_file_to_table()
 
@@ -284,6 +349,7 @@ class MonitorWindow(QMainWindow):
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setRowCount(len(rows))
+
         for i, row in enumerate(rows):
             for j, value in enumerate(row):
                 self.table.setItem(i, j, QTableWidgetItem(value))
@@ -294,10 +360,6 @@ class MonitorWindow(QMainWindow):
             with self.output_file.open("w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(["hora", "cpu", "ram", "disco", "net_enviada", "net_recibida"])
             self.load_file_to_table()
-
-    def switch_to_viewer(self) -> None:
-        self.load_file_to_table()
-        self.stack.setCurrentIndex(1)
 
 
 if __name__ == "__main__":
